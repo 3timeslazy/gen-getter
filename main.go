@@ -5,61 +5,56 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
+	"log"
 	"os"
 	"strings"
 	"text/template"
-
-	"github.com/Originate/exit"
 )
 
-type structGenData struct {
-	Name   string
-	Fields []fieldGenData
-}
-
-type fieldGenData struct {
-	StructName            string
-	FieldName             string
-	FieldType             string
-	FieldTypeDefaultValue string
-}
-
 type getterGenData struct {
-	StructName            string
-	FieldName             string
-	FieldType             string
-	FieldTypeDefaultValue string
+	StructName       string
+	Name             string
+	Type             string
+	TypeDefaultValue string
 }
 
 var (
-	fieldGetter = `
-// Get{{ .FieldName }} do smth...
-func (this *{{ .StructName }}) Get{{ .FieldName }}() {{ .FieldType }} {
-	if this != nil {
-		return this.{{ .FieldName }}
-	}
-	return {{ .FieldTypeDefaultValue }}
-}
-`
+	importText = "\n" +
+		"import (" +
+		"\t{{ range . }}\n" +
+		"\t{{ . }}" +
+		"{{- end }}\n" +
+		")\n"
 
-	fieldGetterTemplate = template.Must(template.New("getter").Parse(fieldGetter))
+	getterText = "\n" +
+		"{{ range . }}" +
+		"\n// Get{{ .Name }} returns  {{ .Name }} of the struct\n" +
+		"func (this{{ .StructName }} *{{ .StructName }}) Get{{ .Name }}() {{ .Type }} {\n" +
+		"\tif this{{ .StructName }} != nil {\n" +
+		"\t\treturn this{{ .StructName }}.{{ .Name }}\n" +
+		"\t}\n" +
+		"\treturn {{ .TypeDefaultValue }}\n" +
+		"}\n" +
+		"{{ end }}\n"
+
+	importTemplate = template.Must(template.New("import").Parse(importText))
+	getterTemplate = template.Must(template.New("getter").Parse(getterText))
 )
 
 func main() {
 	fset := token.NewFileSet()
 
 	node, err := parser.ParseFile(fset, os.Args[1], nil, parser.ParseComments)
-	exit.IfWrap(err, "parse file")
+	fatal(err, "parse file")
 
 	out, err := os.Create(os.Args[2])
-	exit.IfWrap(err, "create file")
+	fatal(err, "create file")
 
 	fmt.Fprintf(out, "package %s\n", node.Name.Name)
 
 	allGettersGenData := []getterGenData{}
+	imports := []string{}
 
-	singleGetterGenData := getterGenData{}
 	for _, decl := range node.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok {
@@ -67,6 +62,11 @@ func main() {
 		}
 
 		for _, spec := range genDecl.Specs {
+			if impt, ok := spec.(*ast.ImportSpec); ok {
+				imports = append(imports, impt.Path.Value)
+				continue
+			}
+
 			currStructTypeSpec, ok := spec.(*ast.TypeSpec)
 			if !ok {
 				continue
@@ -77,53 +77,62 @@ func main() {
 				continue
 			}
 
-			singleGetterGenData.StructName = currStructTypeSpec.Name.Name
+			currStructName := currStructTypeSpec.Name.Name
 
 			for _, field := range currStructType.Fields.List {
-				singleGetterGenData.FieldName = field.Names[0].Name
+				Name := field.Names[0].Name
+				Type := getType(field.Type, "").(string)
+				TypeDefaultValue := getTypeDefaultValue(Type)
 
-				switch fieldType := field.Type.(type) {
-				case *ast.StarExpr:
-					singleGetterGenData.FieldType = "*" + fieldType.X.(*ast.Ident).Name
-				case *ast.Ident:
-					singleGetterGenData.FieldType = fieldType.Name
-				case *ast.ArrayType:
-					elt := fieldType.Elt
-					switch v := elt.(type) {
-					case *ast.Ident:
-						singleGetterGenData.FieldType = "[]" + v.Name
-					case *ast.StarExpr:
-						singleGetterGenData.FieldType = "[]*" + v.X.(*ast.Ident).Name
-					}
-				case *ast.MapType:
-					singleGetterGenData.FieldType = "map[" + fieldType.Key.(*ast.Ident).Name + "]"
-					switch v := fieldType.Value.(type) {
-					case *ast.StarExpr:
-						singleGetterGenData.FieldType += "*" + v.X.(*ast.Ident).Name
-					case *ast.Ident:
-						singleGetterGenData.FieldType += v.Name
-					}
-				}
-
-				currTypeDefaultValue := typeDefaultValue(singleGetterGenData.FieldType)
-				singleGetterGenData.FieldTypeDefaultValue = currTypeDefaultValue
-
-				allGettersGenData = append(allGettersGenData, singleGetterGenData)
+				allGettersGenData = append(allGettersGenData, getterGenData{
+					StructName:       currStructName,
+					Name:             Name,
+					Type:             Type,
+					TypeDefaultValue: TypeDefaultValue,
+				})
 			}
 		}
 	}
 
-	for _, genData := range allGettersGenData {
-		genGetter(out, &genData)
+	err = importTemplate.Execute(out, imports)
+	fatal(err, "failed to make imports")
+
+	err = getterTemplate.Execute(out, allGettersGenData)
+	fatal(err, "failed to make getters")
+}
+
+func getType(dst interface{}, result string) interface{} {
+	switch Type := dst.(type) {
+	case string:
+		return result + Type
+	case *ast.Ident:
+		return getType(Type.Name, result)
+	case *ast.StarExpr:
+		typ := getType(Type.X, "").(string)
+		return getType("*"+typ, result)
+	case *ast.ArrayType:
+		length := ""
+		if Type.Len != nil {
+			length = getType(Type.Len, "").(string)
+		}
+		result += "[" + length + "]"
+		return getType(Type.Elt, result)
+	case *ast.MapType:
+		key := getType(Type.Key, "").(string)
+		value := getType(Type.Value, "").(string)
+		return getType("map["+key+"]"+value, result)
+	case *ast.SelectorExpr:
+		typ := Type.Sel.Name
+		pckg := getType(Type.X, "").(string)
+		return pckg + "." + typ
+	case *ast.BasicLit:
+		return getType(Type.Value, result)
+	default:
+		panic(fmt.Sprintf("unsupported type %T"))
 	}
 }
 
-func genGetter(w io.Writer, genData *getterGenData) {
-	err := fieldGetterTemplate.Execute(w, genData)
-	exit.IfWrapf(err, "gen getter for field %s", genData.FieldName)
-}
-
-func typeDefaultValue(typ string) (val string) {
+func getTypeDefaultValue(typ string) (val string) {
 	basicTypes := map[string]string{
 		"int":        "0",
 		"int8":       "0",
@@ -152,7 +161,7 @@ func typeDefaultValue(typ string) (val string) {
 
 	val = typ + "{}"
 
-	if strings.Contains(val, "[]") {
+	if strings.HasPrefix(val, "[") {
 		return val
 	}
 
@@ -165,4 +174,10 @@ func typeDefaultValue(typ string) (val string) {
 	}
 
 	return val
+}
+
+func fatal(err error, msg string, args ...interface{}) {
+	if err != nil {
+		log.Fatalf(fmt.Sprintf(msg, args...)+": %s", err.Error())
+	}
 }
