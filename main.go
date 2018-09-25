@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -24,18 +23,20 @@ var (
 		"\t{{ range . }}\n" +
 		"\t{{ . }}" +
 		"{{- end }}\n" +
-		")\n"
+		")"
 
 	getterText = "\n" +
 		"{{ range . }}" +
-		"\n// Get{{ .Name }} returns  {{ .Name }} of the struct\n" +
+		`{{ if ne .Type "" }}` +
+		"\n// Get{{ .Name }} returns field {{ .Name }} of the struct\n" +
 		"func (this{{ .StructName }} *{{ .StructName }}) Get{{ .Name }}() {{ .Type }} {\n" +
 		"\tif this{{ .StructName }} != nil {\n" +
 		"\t\treturn this{{ .StructName }}.{{ .Name }}\n" +
 		"\t}\n" +
 		"\treturn {{ .TypeDefaultValue }}\n" +
 		"}\n" +
-		"{{ end }}\n"
+		"{{ end }}" +
+		"{{ end }}"
 
 	importTemplate = template.Must(template.New("import").Parse(importText))
 	getterTemplate = template.Must(template.New("getter").Parse(getterText))
@@ -49,8 +50,6 @@ func main() {
 
 	out, err := os.Create(os.Args[2])
 	fatal(err, "create file")
-
-	fmt.Fprintf(out, "package %s\n", node.Name.Name)
 
 	allGettersGenData := []getterGenData{}
 	imports := []string{}
@@ -80,19 +79,22 @@ func main() {
 			currStructName := currStructTypeSpec.Name.Name
 
 			for _, field := range currStructType.Fields.List {
-				Name := field.Names[0].Name
-				Type := getType(field.Type, "").(string)
-				TypeDefaultValue := getTypeDefaultValue(Type)
+				fname := field.Names[0].Name
+				ftype := getType(field.Type, "").(string)
+				ftypeDefaultValue := getTypeDefaultValue(ftype)
 
 				allGettersGenData = append(allGettersGenData, getterGenData{
 					StructName:       currStructName,
-					Name:             Name,
-					Type:             Type,
-					TypeDefaultValue: TypeDefaultValue,
+					Name:             fname,
+					Type:             ftype,
+					TypeDefaultValue: ftypeDefaultValue,
 				})
 			}
 		}
 	}
+
+	_, err = out.WriteString("package " + node.Name.Name)
+	fatal(err, "failed to write package")
 
 	err = importTemplate.Execute(out, imports)
 	fatal(err, "failed to make imports")
@@ -128,56 +130,47 @@ func getType(dst interface{}, result string) interface{} {
 	case *ast.BasicLit:
 		return getType(Type.Value, result)
 	default:
-		panic(fmt.Sprintf("unsupported type %T"))
+		return getType("", "")
 	}
 }
 
-func getTypeDefaultValue(typ string) (val string) {
-	basicTypes := map[string]string{
-		"int":        "0",
-		"int8":       "0",
-		"int16":      "0",
-		"int32":      "0",
-		"int64":      "0",
-		"uint":       "0",
-		"uint8":      "0",
-		"uint16":     "0",
-		"uint32":     "0",
-		"uint64":     "0",
-		"uintptr":    "0",
-		"byte":       "0",
-		"rune":       "0",
-		"float32":    "0.0",
-		"float64":    "0.0",
-		"complex64":  "(0 + 0i)",
-		"complex128": "(0 + 0i)",
-		"string":     `""`,
-		"bool":       "false",
+func getTypeDefaultValue(typ string) string {
+	numTypes := []string{"int", "int8", "int16", "int32",
+		"int64", "uint", "uint8", "uint16", "uint32",
+		"uint64", "uintptr", "byte", "rune", "float32",
+		"float32", "float64", "complex64", "complex128",
 	}
 
-	if v, ok := basicTypes[typ]; ok {
-		return v
+	for _, numType := range numTypes {
+		if typ == numType {
+			return "0"
+		}
+	}
+	if typ == "string" {
+		return `""`
+	}
+	if typ == "bool" {
+		return "false"
 	}
 
-	val = typ + "{}"
+	val := typ + "{}"
 
 	if strings.HasPrefix(val, "[") {
 		return val
 	}
-
 	if strings.Contains(val, "map") {
 		return val
 	}
 
 	if strings.Contains(val, "*") {
-		val = strings.Replace(val, "*", "&", -1)
+		return strings.Replace(val, "*", "&", -1)
 	}
 
 	return val
 }
 
-func fatal(err error, msg string, args ...interface{}) {
+func fatal(err error, msg string) {
 	if err != nil {
-		log.Fatalf(fmt.Sprintf(msg, args...)+": %s", err.Error())
+		log.Fatalf("%s: %s", msg, err.Error())
 	}
 }

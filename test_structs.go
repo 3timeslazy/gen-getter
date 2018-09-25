@@ -75,6 +75,8 @@ type Time struct {
 }
 
 type Custom struct {
+	// shouldn't be a getter for this field
+	Custom  interface{}
 	Custom2 map[int][][][]map[float32][]*Sub
 	Custom3 [][][2][][10]map[int]*time.Time
 }
