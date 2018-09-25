@@ -93,7 +93,7 @@ func main() {
 		}
 	}
 
-	_, err = out.WriteString("package " + node.Name.Name)
+	_, err = out.WriteString("package " + node.Name.Name + "\n")
 	fatal(err, "failed to write package")
 
 	err = importTemplate.Execute(out, imports)
