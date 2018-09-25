@@ -7,5 +7,8 @@ Simple Golang getter generator
 go get github.com/3timeslazy/gen-getter
 
 # run
-go build <source_file> <generated_file_name>
+go build
+
+# use
+./get-getter <source_file> <generated_file_name>
 ```
